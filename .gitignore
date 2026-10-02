@@ -1,0 +1,9 @@
+# Build artifacts
+*.zip
+
+# Internal working notes (coordination briefs), not part of the published extension
+notes/
+
+# OS noise
+.DS_Store
+Thumbs.db

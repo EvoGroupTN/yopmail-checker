@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>YOPmail Checker</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="top-bar">
+      <div class="address-combo" id="addressCombo">
+        <input
+          type="text"
+          id="addressInput"
+          placeholder="hermes.test.e091mc"
+          autocomplete="off"
+          spellcheck="false"
+          aria-autocomplete="list"
+          aria-controls="addressList"
+        />
+        <button id="addressToggle" class="combo-toggle" type="button" aria-label="Saved addresses" aria-haspopup="listbox" aria-expanded="false">▾</button>
+        <ul id="addressList" class="combo-list" role="listbox" hidden></ul>
+      </div>
+      <button id="goBtn" class="btn btn-primary">Go</button>
+      <button id="refreshBtn" class="btn btn-secondary">Refresh</button>
+    </header>
+
+    <div id="status" class="status" aria-live="polite"></div>
+
+    <main class="panes">
+      <section class="pane pane-list">
+        <h2>Inbox</h2>
+        <div id="inboxList" class="inbox-list">
+          <div class="empty">Enter an address and click Go.</div>
+        </div>
+      </section>
+
+      <section class="pane pane-content">
+        <h2>Message</h2>
+        <div id="mailContent" class="mail-content">
+          <div class="empty">Select an email to read it.</div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
