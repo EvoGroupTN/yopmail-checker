@@ -1,6 +1,8 @@
 const VERSION_DEFAULT = '9.4';
 const STORAGE_KEY = 'yopmail_address';
 const STORAGE_ADDRESSES_KEY = 'yopmail_addresses';
+const STORAGE_SHOW_PICTURES_KEY = 'yopmail_show_pictures';
+const LAYOUT_WIDTH = 640;
 const MAX_ADDRESSES = 25;
 
 const els = {
@@ -13,9 +15,12 @@ const els = {
   combo: document.getElementById('addressCombo'),
   toggle: document.getElementById('addressToggle'),
   list: document.getElementById('addressList'),
+  showPictures: document.getElementById('showPictures'),
+  picturesHint: document.getElementById('picturesHint'),
 };
 
 let addresses = [];
+let showPictures = false;
 
 let state = {
   address: '',
@@ -148,8 +153,9 @@ async function fetchInbox(address) {
   });
   const url = `https://yopmail.com/en/inbox?${params.toString()}`;
   let res = await fetchText(url);
+  let kind = classifyInbox(res.text);
 
-  if (!res.ok || res.status === 400) {
+  if (!res.ok || res.status === 400 || kind === 'stub' || kind === 'wall') {
     // Session token probably stale; refresh once and retry.
     await bootstrapSession(address, true);
     params.set('yp', state.yp);
@@ -157,10 +163,17 @@ async function fetchInbox(address) {
     params.set('v', state.version);
     await setYTimeCookie();
     res = await fetchText(`https://yopmail.com/en/inbox?${params.toString()}`);
+    kind = classifyInbox(res.text);
   }
 
   if (!res.ok) {
     throw new Error(`Inbox request failed: HTTP ${res.status}`);
+  }
+  if (kind === 'wall') {
+    throw new Error('This inbox requires human verification and cannot be shown inside the extension.');
+  }
+  if (kind === 'stub') {
+    throw new Error('Could not load the inbox — the YOPmail session expired. Press Refresh.');
   }
 
   return parseInbox(res.text);
@@ -194,35 +207,205 @@ function parseInbox(html) {
   return mails;
 }
 
-async function fetchMailBody(address, msgId) {
+async function fetchMailBody(address, msgId, mode = 'm') {
   await setYTimeCookie();
-  const url = `https://yopmail.com/en/mail?b=${encodeURIComponent(address)}&id=m${encodeURIComponent(msgId)}`;
-  const { ok, status, text } = await fetchText(url);
-  if (!ok) {
-    throw new Error(`Mail body failed: HTTP ${status}`);
+  const buildUrl = () => `https://yopmail.com/en/mail?b=${encodeURIComponent(address)}&id=${mode}${encodeURIComponent(msgId)}`;
+  let res = await fetchText(buildUrl());
+  if (!res.ok) {
+    throw new Error(`Mail body failed: HTTP ${res.status}`);
   }
-  return text;
+
+  let kind = classifyMailBody(res.text);
+  if (kind === 'stub') {
+    await bootstrapSession(address, true);
+    await setYTimeCookie();
+    res = await fetchText(buildUrl());
+    if (!res.ok) {
+      throw new Error(`Mail body failed: HTTP ${res.status}`);
+    }
+    kind = classifyMailBody(res.text);
+    if (kind === 'stub') {
+      throw new Error('Could not load this message \u2014 the YOPmail session expired. Press Refresh.');
+    }
+  }
+
+  return res.text;
 }
 
-function stripScripts(html) {
-  const div = document.createElement('div');
-  div.innerHTML = html;
-  div.querySelectorAll('script').forEach((s) => s.remove());
-  div.querySelectorAll('iframe, frame').forEach((f) => f.remove());
+function detectHumanWall(html) {
+  const hasMailctn = /<[^>]*\bid=["']?mailctn["']?[^>]*>/i.test(html);
+  return !hasMailctn && /confirm you're human/i.test(html);
+}
+
+function isRetStub(html) {
+  return /\.ret\s*\{/i.test(html);
+}
+
+function classifyMailBody(html) {
+  const hasMailctn = /<[^>]*\bid=["']?mailctn["']?[^>]*>/i.test(html);
+  const hasMail = /<[^>]*\bid=["']?mail["']?[^>]*>/i.test(html);
+  if (hasMailctn || hasMail) return 'valid';
+  if (detectHumanWall(html)) return 'wall';
+  if (isRetStub(html) || html.length < 1024) return 'stub';
+  return 'stub';
+}
+
+function classifyInbox(html) {
+  if (detectHumanWall(html)) return 'wall';
+  const hasMessage = /<div[^>]*\bclass=["'][^"']*\bm\b/i.test(html);
+  const hasDay = /<div[^>]*\bclass=["']?mday["']?/i.test(html);
+  if (hasMessage || hasDay) return 'valid';
+  // A genuine empty inbox still has the inbox chrome; the stale-session stub is the .ret page.
+  if (isRetStub(html)) return 'stub';
+  return 'valid';
+}
+
+function sanitizeFragment(html) {
+  const wrapper = document.createElement('div');
+  wrapper.innerHTML = html;
+
+  // Strip dangerous/undesirable tags and hidden elements.
+  wrapper.querySelectorAll('script, meta, link, iframe, frame, style').forEach((el) => el.remove());
+  wrapper.querySelectorAll('[style*="display:none" i], [style*="display: none" i]').forEach((el) => el.remove());
+
+  // Remove any leftover YOPmail viewer toolbar items.
+  const toolbarLabels = new Set(['Deliverability', 'Reply', 'Forward', 'Print', 'Delete', 'Html', 'Text', 'Headers', 'Source', 'Download']);
+  wrapper.querySelectorAll('*').forEach((el) => {
+    if (el.children.length === 0 && toolbarLabels.has(el.textContent.trim())) {
+      el.remove();
+    }
+  });
+
   // Make links open externally rather than inside the iframe.
-  div.querySelectorAll('a[href]').forEach((a) => {
+  wrapper.querySelectorAll('a[href]').forEach((a) => {
     a.setAttribute('target', '_blank');
     a.setAttribute('rel', 'noopener noreferrer');
   });
-  return div.innerHTML;
+
+  return wrapper.innerHTML;
 }
 
 function extractBody(html) {
-  // YOPmail wraps the actual message in <div id="mail">.
-  const mailMatch = html.match(/<div id="mail"[^>]*>([\s\S]*?)<\/div>/i);
-  if (mailMatch) return mailMatch[1];
-  const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
-  return bodyMatch ? bodyMatch[1] : html;
+  if (detectHumanWall(html)) {
+    return { wall: true, html: '', hasBlankImages: false };
+  }
+
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  let container = doc.getElementById('mailctn') || doc.getElementById('mail');
+  const rawFragment = container ? container.innerHTML : (doc.body ? doc.body.innerHTML : html);
+
+  const cleanHtml = sanitizeFragment(rawFragment);
+
+  const temp = document.createElement('div');
+  temp.innerHTML = cleanHtml;
+  const imgs = temp.querySelectorAll('img');
+  const hasBlankImages = Array.from(imgs).some((img) => !img.getAttribute('src'));
+
+  return { wall: false, html: cleanHtml, hasBlankImages };
+}
+
+function buildSrcdoc(bodyHtml) {
+  return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="color-scheme" content="light">
+  <base href="https://yopmail.com" target="_blank">
+  <style>
+    html, body { background: #ffffff; color: #1a1a1a; color-scheme: light; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 13px; line-height: 1.5; padding: 12px; margin: 0; }
+    pre, code { white-space: pre-wrap; word-break: break-word; }
+    img { max-width: 100%; height: auto; }
+    a { color: #4f8cff; }
+  </style>
+</head>
+<body>${bodyHtml}</body>
+</html>`;
+}
+
+function renderWallNotice(address) {
+  els.mailContent.innerHTML = `
+    <div class="human-wall">
+      <p>This message requires human verification and cannot be shown inside the extension.</p>
+      <a href="https://yopmail.com/en/?login=${encodeURIComponent(address)}" target="_blank" rel="noopener noreferrer">Open in YOPmail</a>
+    </div>
+  `;
+}
+
+function updatePicturesHint(hasBlankImages) {
+  if (hasBlankImages && !showPictures) {
+    els.picturesHint.hidden = false;
+    els.picturesHint.textContent = 'Some images are hidden';
+  } else {
+    els.picturesHint.hidden = true;
+  }
+}
+
+function scaleIframe(iframe) {
+  const scaler = iframe.parentElement;
+  if (!scaler) return;
+
+  const doc = iframe.contentDocument;
+  if (!doc || !doc.body) return;
+
+  const naturalWidth = doc.body.scrollWidth;
+  const layoutWidth = Math.max(LAYOUT_WIDTH, naturalWidth);
+  const paneWidth = scaler.clientWidth;
+  const scale = Math.min(1, paneWidth / layoutWidth);
+
+  iframe.style.width = `${layoutWidth}px`;
+  iframe.style.transformOrigin = 'top left';
+  iframe.style.transform = `scale(${scale})`;
+
+  const naturalHeight = doc.body.scrollHeight;
+  iframe.style.height = `${naturalHeight}px`;
+  scaler.style.height = `${naturalHeight * scale}px`;
+}
+
+function setupIframeScaling(iframe) {
+  function onLoad() {
+    scaleIframe(iframe);
+
+    const doc = iframe.contentDocument;
+    if (doc && doc.body) {
+      const resizeObserver = new ResizeObserver(() => scaleIframe(iframe));
+      resizeObserver.observe(doc.body);
+
+      // Recompute as remote images load so the scaler height stays correct.
+      doc.querySelectorAll('img').forEach((img) => {
+        if (img.complete) return;
+        img.addEventListener('load', () => scaleIframe(iframe), { once: true });
+        img.addEventListener('error', () => scaleIframe(iframe), { once: true });
+      });
+    }
+  }
+
+  iframe.addEventListener('load', onLoad, { once: true });
+
+  const paneObserver = new ResizeObserver(() => scaleIframe(iframe));
+  paneObserver.observe(els.mailContent);
+}
+
+function renderMessage(result, address) {
+  if (result.wall) {
+    renderWallNotice(address);
+    return;
+  }
+
+  const scaler = document.createElement('div');
+  scaler.className = 'mail-scaler';
+
+  const iframe = document.createElement('iframe');
+  iframe.className = 'mail-iframe';
+  iframe.sandbox = 'allow-same-origin';
+  iframe.srcdoc = buildSrcdoc(result.html);
+
+  scaler.appendChild(iframe);
+
+  els.mailContent.innerHTML = '';
+  els.mailContent.appendChild(scaler);
+
+  setupIframeScaling(iframe);
 }
 
 function renderInbox() {
@@ -261,32 +444,12 @@ async function selectMail(msgId) {
   els.mailContent.innerHTML = '<div class="empty">Loading message…</div>';
 
   try {
-    const rawHtml = await fetchMailBody(state.address, msgId);
-    const cleanHtml = stripScripts(rawHtml);
-    const body = extractBody(cleanHtml);
+    const mode = showPictures ? 'i' : 'm';
+    const rawHtml = await fetchMailBody(state.address, msgId, mode);
+    const result = extractBody(rawHtml);
 
-    const iframe = document.createElement('iframe');
-    iframe.sandbox = '';
-    iframe.srcdoc = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="utf-8">
-        <base target="_blank">
-        <style>
-          html, body { background: #ffffff; color: #1a1a1a; }
-          body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 13px; line-height: 1.5; padding: 12px; margin: 0; }
-          pre, code { white-space: pre-wrap; word-break: break-word; }
-          img { max-width: 100%; height: auto; }
-          a { color: #4f8cff; }
-        </style>
-      </head>
-      <body>${body}</body>
-      </html>
-    `;
-
-    els.mailContent.innerHTML = '';
-    els.mailContent.appendChild(iframe);
+    updatePicturesHint(result.hasBlankImages);
+    renderMessage(result, state.address);
   } catch (err) {
     els.mailContent.innerHTML = `<div class="empty error">${escapeHtml(err.message)}</div>`;
   }
@@ -301,13 +464,16 @@ function escapeHtml(str) {
 }
 
 async function loadAddresses() {
-  const saved = await chrome.storage.local.get([STORAGE_KEY, STORAGE_ADDRESSES_KEY]);
+  const saved = await chrome.storage.local.get([STORAGE_KEY, STORAGE_ADDRESSES_KEY, STORAGE_SHOW_PICTURES_KEY]);
   let list = saved[STORAGE_ADDRESSES_KEY];
   if (!Array.isArray(list)) {
     list = saved[STORAGE_KEY] ? [saved[STORAGE_KEY]] : [];
     await chrome.storage.local.set({ [STORAGE_ADDRESSES_KEY]: list });
   }
   addresses = list.slice(0, MAX_ADDRESSES);
+
+  showPictures = saved[STORAGE_SHOW_PICTURES_KEY] === true;
+  els.showPictures.checked = showPictures;
 }
 
 async function rememberAddress(address) {
@@ -469,6 +635,16 @@ els.combo.addEventListener('click', (e) => {
 document.addEventListener('mousedown', (e) => {
   if (!els.combo.contains(e.target)) {
     closeList();
+  }
+});
+
+els.showPictures.addEventListener('change', async () => {
+  showPictures = els.showPictures.checked;
+  await chrome.storage.local.set({ [STORAGE_SHOW_PICTURES_KEY]: showPictures });
+  if (state.selectedId) {
+    selectMail(state.selectedId);
+  } else {
+    updatePicturesHint(false);
   }
 });
 

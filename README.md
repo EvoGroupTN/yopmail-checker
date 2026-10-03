@@ -29,6 +29,15 @@ A minimal Manifest V3 Chrome extension to check the last few emails of any YOPma
 - Click the **✕** on a row to remove that address from history.
 - If you upgraded from an older version that only saved a single address, the first launch migrates that value into the new history list automatically.
 
+### Message pane
+
+- HTML newsletters are rendered at a 640 px layout width and scaled to fit the pane, so a 600 px wide
+  email is fully visible without horizontal clipping.
+- **Show pictures** — off by default (YOPmail withholds `<img src>` to block tracking beacons). Tick it to
+  re-fetch the message in picture mode; the choice is stored in `yopmail_show_pictures` and reused.
+- Some messages (e.g. account-security mails) come back with YOPmail's human-verification challenge. The
+  pane then shows a short notice and an **Open in YOPmail** link instead of a broken render.
+
 ## Files
 
 - `manifest.json` — MV3 manifest.
@@ -36,6 +45,8 @@ A minimal Manifest V3 Chrome extension to check the last few emails of any YOPma
 - `background.js` — minimal service worker.
 - `icon16.png`, `icon48.png`, `icon128.png` — extension icons.
 - `scripts/test-fetch.mjs` — Node test script for the YOPmail HTTP pipeline.
+- `scripts/screenshot.mjs` — Puppeteer harness that drives the popup headlessly (`npm ci` first).
+- `screenshot-*.png` — screenshots used in the docs.
 - `notes/` — coordination briefs (not shipped in the zip).
 
 ## Test
@@ -44,7 +55,7 @@ A minimal Manifest V3 Chrome extension to check the last few emails of any YOPma
 node scripts/test-fetch.mjs
 ```
 
-This prints the parsed last-3 list and the plain-text body of the newest message for the live inbox `hermes.test.e091mc@yopmail.com`.
+This prints the parsed first-5 list and a mode matrix (m/i length, image counts, human-wall detection, extracted fragment length) for the live inbox `testmail123@yopmail.com`.
 
 ## Testing / dev
 
@@ -60,4 +71,5 @@ When `?address=` is present, the popup prefills and saves that address and immed
 
 ## Zip
 
-`yopmail-checker.zip` is a packaged copy of the extension for easy sharing. It excludes `notes/`, `node_modules/`, `screenshot-popup.png`, and the zip itself.
+`yopmail-checker.zip` is a packaged copy of the extension for easy sharing. It excludes `notes/`,
+`node_modules/`, the screenshots, and the zip itself.

@@ -1,9 +1,12 @@
 // Node test of the verified YOPmail HTTP pipeline.
-// Performs steps 1-4 against hermes.test.e091mc@yopmail.com and prints the
-// parsed last-3 inbox + first 200 chars of the newest message body.
+// Performs steps 1-4 against testmail123@yopmail.com and prints a mode matrix
+// for the first messages: m/i length, image counts, human-wall detection, and
+// extracted fragment length. Stale-session stubs are detected and labelled STUB.
 
-const ADDRESS = 'hermes.test.e091mc';
+const ADDRESS = 'testmail123';
 const VERSION_DEFAULT = '9.4';
+const MAX_MESSAGES = 5;
+const BASE_URL = process.env.YOPMAIL_BASE_URL || 'https://yopmail.com';
 
 // Minimal cookie jar using fetch's cookie header handling.
 const cookieJar = {
@@ -38,6 +41,7 @@ const cookieJar = {
 
 async function yopFetch(url, opts = {}) {
   const headers = new Headers(opts.headers || {});
+  headers.set('User-Agent', 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36');
   const cookie = cookieJar.get();
   if (cookie) headers.set('Cookie', cookie);
 
@@ -66,11 +70,35 @@ function extractYJ(js) {
   return m[1];
 }
 
-function parseInbox(html) {
+async function bootstrap() {
+  // Step 1a: GET bootstrap page (sets yc/yses cookies and gives initial yp).
+  const r1 = await yopFetch(`${BASE_URL}/en/?login=${encodeURIComponent(ADDRESS)}`);
+  if (!r1.ok) throw new Error(`Bootstrap failed: HTTP ${r1.status}`);
+  const yp1 = extractYP(r1.text);
+  const version = extractVersion(r1.text);
+
+  // Step 1b: auto-submit the session form (sets compte/ywm cookies and returns wm page).
+  const r2 = await yopFetch(`${BASE_URL}/en/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `yp=${encodeURIComponent(yp1)}&login=${encodeURIComponent(ADDRESS)}&id=`,
+  });
+  if (!r2.ok) throw new Error(`Session form submit failed: HTTP ${r2.status}`);
+  const yp2 = extractYP(r2.text);
+
+  // Step 2: fetch anti-bot token yj from the served webmail.js.
+  const r3 = await yopFetch(`${BASE_URL}/ver/${version}/webmail.js`);
+  if (!r3.ok) throw new Error(`webmail.js failed: HTTP ${r3.status}`);
+  const yj = extractYJ(r3.text);
+
+  return { yp: yp2, yj, version };
+}
+
+function parseInbox(html, max = 3) {
   const mails = [];
   const messageRe = /<div[^>]*\bclass="m"[^>]*\bid="([^"]+)"[^>]*>([\s\S]*?)<\/div>\s*(?=<div[^>]*\bclass="(?:m|mday|adbar)"|<\/div>\s*$|$)/g;
   let m;
-  while ((m = messageRe.exec(html)) !== null && mails.length < 3) {
+  while ((m = messageRe.exec(html)) !== null && mails.length < max) {
     const id = m[1];
     const block = m[2];
     const time = (block.match(/<span class="lmh">([^<]*)<\/span>/) || ['', ''])[1];
@@ -81,77 +109,148 @@ function parseInbox(html) {
   return mails;
 }
 
-async function main() {
-  console.log('--- YOPmail fetch test ---');
-  console.log(`Address: ${ADDRESS}@yopmail.com\n`);
+function detectWall(html) {
+  const hasMailctn = /<[^>]*\bid=["']?mailctn["']?[^>]*>/i.test(html);
+  return !hasMailctn && /confirm you're human/i.test(html);
+}
 
-  // Step 1a: GET bootstrap page (sets yc/yses cookies and gives initial yp).
-  const bootstrapUrl = `https://yopmail.com/en/?login=${encodeURIComponent(ADDRESS)}`;
-  const bootstrap = await yopFetch(bootstrapUrl);
-  if (!bootstrap.ok) throw new Error(`Bootstrap failed: HTTP ${bootstrap.status}`);
-  const yp1 = extractYP(bootstrap.text);
-  const version = extractVersion(bootstrap.text);
-  console.log(`Step 1a OK - version=${version}, yp=${yp1.slice(0, 8)}...`);
+function isRetStub(html) {
+  return /\.ret\s*\{/i.test(html);
+}
 
-  // Step 1b: auto-submit the session form (sets compte/ywm cookies and returns wm page).
-  const formRes = await yopFetch('https://yopmail.com/en/', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: `yp=${encodeURIComponent(yp1)}&login=${encodeURIComponent(ADDRESS)}&id=`,
-  });
-  if (!formRes.ok) throw new Error(`Session form submit failed: HTTP ${formRes.status}`);
-  const yp2 = extractYP(formRes.text);
-  console.log(`Step 1b OK - session yp=${yp2.slice(0, 8)}...`);
+function classifyMailBody(html) {
+  const hasMailctn = /<[^>]*\bid=["']?mailctn["']?[^>]*>/i.test(html);
+  const hasMail = /<[^>]*\bid=["']?mail["']?[^>]*>/i.test(html);
+  if (hasMailctn || hasMail) return 'valid';
+  if (detectWall(html)) return 'wall';
+  if (isRetStub(html) || html.length < 1024) return 'stub';
+  return 'stub';
+}
 
-  // Step 2: fetch anti-bot token yj from the served webmail.js.
-  const jsUrl = `https://yopmail.com/ver/${version}/webmail.js`;
-  const jsRes = await yopFetch(jsUrl);
-  if (!jsRes.ok) throw new Error(`webmail.js failed: HTTP ${jsRes.status}`);
-  const yj = extractYJ(jsRes.text);
-  console.log(`Step 2 OK - yj=${yj.slice(0, 8)}...`);
+function classifyInbox(html) {
+  if (detectWall(html)) return 'wall';
+  const hasMessage = /<div[^>]*\bclass=["'][^"']*\bm\b/i.test(html);
+  const hasDay = /<div[^>]*\bclass=["']?mday["']?/i.test(html);
+  if (hasMessage || hasDay) return 'valid';
+  // A genuine empty inbox still has the inbox chrome; the stale-session stub is the .ret page.
+  if (isRetStub(html)) return 'stub';
+  return 'valid';
+}
 
-  // Step 3: inbox list (ytime cookie is required by the server).
+function extractFragment(html) {
+  if (detectWall(html)) {
+    return { wall: true, fragment: '' };
+  }
+
+  let fragment = '';
+  const mailctnMatch = html.match(/<div\b[^>]*\bid=["']?mailctn["']?[^>]*>([\s\S]*?)<\/div>\s*(?=<div|<\/body>|<\/html>|$)/i);
+  if (mailctnMatch) {
+    fragment = mailctnMatch[1];
+  } else {
+    const mailMatch = html.match(/<div\b[^>]*\bid=["']?mail["']?[^>]*>([\s\S]*?)<\/div>\s*(?=<div|<\/body>|<\/html>|$)/i);
+    if (mailMatch) {
+      fragment = mailMatch[1];
+    } else {
+      const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+      fragment = bodyMatch ? bodyMatch[1] : html;
+    }
+  }
+
+  // Strip scripts, styles, meta, links, iframes and display:none elements.
+  fragment = fragment
+    .replace(/<script\b[\s\S]*?<\/script>/gi, '')
+    .replace(/<style\b[\s\S]*?<\/style>/gi, '')
+    .replace(/<meta\b[^>]*>/gi, '')
+    .replace(/<link\b[^>]*>/gi, '')
+    .replace(/<iframe\b[\s\S]*?<\/iframe>/gi, '')
+    .replace(/<[^>]+\bstyle=["'][^"']*display\s*:\s*none[^"']*["'][^>]*>[\s\S]*?<\/[^>]+>/gi, '');
+
+  return { wall: false, fragment };
+}
+
+function countImages(fragment) {
+  const imgCount = (fragment.match(/<img\b/gi) || []).length;
+  const withSrc = (fragment.match(/<img\b[^>]*\bsrc=/gi) || []).length;
+  return { imgCount, withSrc };
+}
+
+async function fetchInboxWithRetry() {
+  let { yp, yj, version } = await bootstrap();
   cookieJar.setYTime();
-  const inboxParams = new URLSearchParams({
+
+  const params = new URLSearchParams({
     login: ADDRESS,
     p: '1',
     d: '',
     ctrl: '',
-    yp: yp2,
+    yp,
     yj,
     v: version,
     r_c: '',
     id: '',
     ad: '0',
   });
-  const inboxUrl = `https://yopmail.com/en/inbox?${inboxParams.toString()}`;
-  let inbox = await yopFetch(inboxUrl);
+  let inbox = await yopFetch(`${BASE_URL}/en/inbox?${params.toString()}`);
+  let kind = classifyInbox(inbox.text);
 
-  if (!inbox.ok || inbox.status === 400) {
-    console.log('Inbox 400, refreshing session and retrying...');
-    const fresh = await yopFetch(bootstrapUrl);
-    const freshYP1 = extractYP(fresh.text);
-    const freshVer = extractVersion(fresh.text);
-    const freshForm = await yopFetch('https://yopmail.com/en/', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: `yp=${encodeURIComponent(freshYP1)}&login=${encodeURIComponent(ADDRESS)}&id=`,
-    });
-    const freshYP2 = extractYP(freshForm.text);
-    const freshJS = await yopFetch(`https://yopmail.com/ver/${freshVer}/webmail.js`);
-    const freshYJ = extractYJ(freshJS.text);
+  if (!inbox.ok || inbox.status === 400 || kind === 'stub' || kind === 'wall') {
+    console.log('Inbox response classified as', kind, '- refreshing session and retrying...');
+    ({ yp, yj, version } = await bootstrap());
     cookieJar.setYTime();
-    inboxParams.set('yp', freshYP2);
-    inboxParams.set('yj', freshYJ);
-    inboxParams.set('v', freshVer);
-    inbox = await yopFetch(`https://yopmail.com/en/inbox?${inboxParams.toString()}`);
+    params.set('yp', yp);
+    params.set('yj', yj);
+    params.set('v', version);
+    inbox = await yopFetch(`${BASE_URL}/en/inbox?${params.toString()}`);
+    kind = classifyInbox(inbox.text);
   }
 
   if (!inbox.ok) throw new Error(`Inbox failed: HTTP ${inbox.status}`);
-  const mails = parseInbox(inbox.text);
-  console.log(`\nStep 3 OK - found ${mails.length} mail(s) on page 1`);
+  if (kind === 'wall') throw new Error('Inbox requires human verification.');
+  if (kind === 'stub') throw new Error('Inbox returned a stub after retry.');
 
-  console.log('\n--- Last 3 emails ---');
+  return { mails: parseInbox(inbox.text, MAX_MESSAGES), yp, yj, version };
+}
+
+async function fetchMailBodyWithRetry(mail, mode) {
+  const buildUrl = () => `${BASE_URL}/en/mail?b=${encodeURIComponent(ADDRESS)}&id=${mode}${encodeURIComponent(mail.id)}`;
+
+  let body = await yopFetch(buildUrl());
+  let kind = classifyMailBody(body.text);
+
+  if (kind === 'stub') {
+    console.log(`  ${mail.id} ${mode}: stub detected, refreshing session and retrying...`);
+    await bootstrap();
+    cookieJar.setYTime();
+    body = await yopFetch(buildUrl());
+    kind = classifyMailBody(body.text);
+  }
+
+  if (!body.ok) {
+    return { status: 'failed', statusCode: body.status };
+  }
+  if (kind === 'stub') {
+    return { status: 'stub', length: body.text.length };
+  }
+
+  const { wall, fragment } = extractFragment(body.text);
+  const { imgCount, withSrc } = countImages(fragment);
+  return {
+    status: wall ? 'wall' : 'ok',
+    length: body.text.length,
+    imgCount,
+    withSrc,
+    fragmentLength: fragment.length,
+  };
+}
+
+async function main() {
+  console.log('--- YOPmail fetch test ---');
+  console.log(`Address: ${ADDRESS}@yopmail.com\n`);
+
+  const { mails } = await fetchInboxWithRetry();
+  console.log(`Step 3 OK - found ${mails.length} mail(s) on page 1`);
+
+  console.log('\n--- Inbox (first 5) ---');
   for (const mail of mails) {
     console.log(`[${mail.time}] ${mail.sender} | ${mail.subject}`);
   }
@@ -161,34 +260,25 @@ async function main() {
     return;
   }
 
-  // Step 4: first mail body
-  const first = mails[0];
-  cookieJar.setYTime();
-  const bodyUrl = `https://yopmail.com/en/mail?b=${encodeURIComponent(ADDRESS)}&id=m${encodeURIComponent(first.id)}`;
-  const bodyRes = await yopFetch(bodyUrl);
-  if (!bodyRes.ok) throw new Error(`Mail body failed: HTTP ${bodyRes.status}`);
+  console.log('\n--- Mode matrix per message ---');
+  console.log('id                | mode | length | imgs | src | wall | fragment');
 
-  function extractMailText(html) {
-    // YOPmail wraps the actual message in <div id="mail">; ignore viewer chrome.
-    const mailMatch = html.match(/<div id="mail"[^>]*>([\s\S]*?)<\/div>/i);
-    const raw = mailMatch ? mailMatch[1] : (html.match(/<body[^>]*>([\s\S]*?)<\/body>/i) || ['', html])[1];
-    return decodeHtmlEntities(raw.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
+  for (const mail of mails) {
+    for (const mode of ['m', 'i']) {
+      const result = await fetchMailBodyWithRetry(mail, mode);
+      if (result.status === 'failed') {
+        console.log(`${mail.id.padEnd(17)} | ${mode}    | FAILED HTTP ${result.statusCode}`);
+      } else if (result.status === 'stub') {
+        console.log(`${mail.id.padEnd(17)} | ${mode}    | ${String(result.length).padStart(6)} |    - |   - |  -  | STUB`);
+      } else if (result.status === 'wall') {
+        console.log(`${mail.id.padEnd(17)} | ${mode}    | ${String(result.length).padStart(6)} |    0 |   0 | YES | 0`);
+      } else {
+        console.log(
+          `${mail.id.padEnd(17)} | ${mode}    | ${String(result.length).padStart(6)} | ${String(result.imgCount).padStart(4)} | ${String(result.withSrc).padStart(3)} | no  | ${result.fragmentLength}`
+        );
+      }
+    }
   }
-
-  function decodeHtmlEntities(str) {
-    return str
-      .replace(/&nbsp;/g, ' ')
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
-      .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(parseInt(dec, 10)));
-  }
-
-  const cleanText = extractMailText(bodyRes.text);
-  console.log(`\nStep 4 OK - body preview (${first.id}):`);
-  console.log(cleanText);
 }
 
 main().catch((err) => {

@@ -4,6 +4,9 @@
 # Internal working notes (coordination briefs), not part of the published extension
 notes/
 
+# Dependencies
+node_modules/
+
 # OS noise
 .DS_Store
 Thumbs.db
