@@ -133,7 +133,7 @@ async function main() {
 
     const items3 = await page.$$('#inboxList .mail-item');
     await items3[wallIdx].click();
-    await page.waitForSelector('.human-wall', { timeout: 15000 });
+    await page.waitForSelector('.human-check', { timeout: 15000 });
     await sleep(500);
     await screenshot(page, 'screenshot-wall.png');
 

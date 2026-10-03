@@ -311,18 +311,25 @@ html, body {
   padding: 24px 12px;
 }
 
-.human-wall {
+.human-check {
   padding: 24px 12px;
   text-align: center;
   color: var(--text);
 }
 
-.human-wall p {
-  margin: 0 0 12px;
+.human-check-title {
+  font-weight: 700;
+  margin: 0 0 8px;
 }
 
-.human-wall a {
-  color: var(--accent);
+.human-check-body {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 0 0 16px;
+}
+
+.human-check .verify-btn {
+  display: inline-block;
 }
 
 .mail-item {

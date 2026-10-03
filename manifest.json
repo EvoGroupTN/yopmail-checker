@@ -1,11 +1,13 @@
 {
   "manifest_version": 3,
   "name": "YOPmail Checker",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Quickly check your YOPmail inbox from the Chrome toolbar.",
   "permissions": [
     "storage",
-    "cookies"
+    "cookies",
+    "scripting",
+    "tabs"
   ],
   "host_permissions": [
     "https://yopmail.com/*"
@@ -13,6 +15,18 @@
   "background": {
     "service_worker": "background.js"
   },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://yopmail.com/*"
+      ],
+      "js": [
+        "content-script.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
   "action": {
     "default_popup": "popup.html",
     "default_icon": {

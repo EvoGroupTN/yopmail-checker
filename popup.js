@@ -2,6 +2,7 @@ const VERSION_DEFAULT = '9.4';
 const STORAGE_KEY = 'yopmail_address';
 const STORAGE_ADDRESSES_KEY = 'yopmail_addresses';
 const STORAGE_SHOW_PICTURES_KEY = 'yopmail_show_pictures';
+const STORAGE_CAPTURED_PREFIX = 'yopmail_captured_';
 const LAYOUT_WIDTH = 640;
 const MAX_ADDRESSES = 25;
 
@@ -30,6 +31,7 @@ let state = {
   mails: [],
   selectedId: null,
   loading: false,
+  inboxWall: false,
 };
 
 function cleanAddress(raw) {
@@ -155,8 +157,8 @@ async function fetchInbox(address) {
   let res = await fetchText(url);
   let kind = classifyInbox(res.text);
 
-  if (!res.ok || res.status === 400 || kind === 'stub' || kind === 'wall') {
-    // Session token probably stale; refresh once and retry.
+  // Retry once for stale-session stubs / HTTP 400. A human-check wall is not fixable by retrying.
+  if (!res.ok || res.status === 400 || kind === 'stub') {
     await bootstrapSession(address, true);
     params.set('yp', state.yp);
     params.set('yj', state.yj);
@@ -170,13 +172,13 @@ async function fetchInbox(address) {
     throw new Error(`Inbox request failed: HTTP ${res.status}`);
   }
   if (kind === 'wall') {
-    throw new Error('This inbox requires human verification and cannot be shown inside the extension.');
+    return { kind: 'wall', mails: [] };
   }
   if (kind === 'stub') {
     throw new Error('Could not load the inbox — the YOPmail session expired. Press Refresh.');
   }
 
-  return parseInbox(res.text);
+  return { kind: 'valid', mails: parseInbox(res.text) };
 }
 
 function parseInbox(html) {
@@ -209,7 +211,8 @@ function parseInbox(html) {
 
 async function fetchMailBody(address, msgId, mode = 'm') {
   await setYTimeCookie();
-  const buildUrl = () => `https://yopmail.com/en/mail?b=${encodeURIComponent(address)}&id=${mode}${encodeURIComponent(msgId)}`;
+  const canonicalId = String(msgId).replace(/^[a-z]/i, '');
+  const buildUrl = () => `https://yopmail.com/en/mail?b=${encodeURIComponent(address)}&id=${mode}${encodeURIComponent(canonicalId)}`;
   let res = await fetchText(buildUrl());
   if (!res.ok) {
     throw new Error(`Mail body failed: HTTP ${res.status}`);
@@ -229,12 +232,17 @@ async function fetchMailBody(address, msgId, mode = 'm') {
     }
   }
 
-  return res.text;
+  return { kind, html: res.text };
 }
 
 function detectHumanWall(html) {
   const hasMailctn = /<[^>]*\bid=["']?mailctn["']?[^>]*>/i.test(html);
-  return !hasMailctn && /confirm you're human/i.test(html);
+  if (hasMailctn) return false;
+  // YOPmail renders reCAPTCHA v2 either as a "confirm you're human" page or by calling showRc().
+  if (/confirm you're human/i.test(html)) return true;
+  if (/window\.top\.showRc\s*\(/i.test(html)) return true;
+  if (/grecaptcha\.render\s*\(/i.test(html)) return true;
+  return false;
 }
 
 function isRetStub(html) {
@@ -323,13 +331,37 @@ function buildSrcdoc(bodyHtml) {
 </html>`;
 }
 
-function renderWallNotice(address) {
-  els.mailContent.innerHTML = `
-    <div class="human-wall">
-      <p>This message requires human verification and cannot be shown inside the extension.</p>
-      <a href="https://yopmail.com/en/?login=${encodeURIComponent(address)}" target="_blank" rel="noopener noreferrer">Open in YOPmail</a>
+function buildVerifyUrl(address, msgId) {
+  if (msgId) {
+    return `https://yopmail.com/en/mail?b=${encodeURIComponent(address)}&id=m${encodeURIComponent(msgId.replace(/^[a-z]/i, ''))}`;
+  }
+  return `https://yopmail.com/en/?login=${encodeURIComponent(address)}`;
+}
+
+function renderHumanCheck(container, address, msgId) {
+  const url = buildVerifyUrl(address, msgId);
+  const isMessage = Boolean(msgId);
+  container.innerHTML = `
+    <div class="human-check">
+      <p class="human-check-title">YOPmail is asking for a human check</p>
+      <p class="human-check-body">${isMessage
+        ? 'This message is behind a verification challenge.'
+        : 'The inbox is behind a verification challenge.'}</p>
+      <button class="btn btn-primary verify-btn" type="button" data-url="${escapeHtml(url)}">Verify in YOPmail</button>
     </div>
   `;
+  const btn = container.querySelector('.verify-btn');
+  if (btn) {
+    btn.addEventListener('click', () => openVerifyTab(url));
+  }
+}
+
+function openVerifyTab(url) {
+  chrome.tabs.create({ url });
+}
+
+function renderWallNotice(address, msgId) {
+  renderHumanCheck(els.mailContent, address, msgId);
 }
 
 function updatePicturesHint(hasBlankImages) {
@@ -386,9 +418,9 @@ function setupIframeScaling(iframe) {
   paneObserver.observe(els.mailContent);
 }
 
-function renderMessage(result, address) {
+function renderMessage(result, address, msgId) {
   if (result.wall) {
-    renderWallNotice(address);
+    renderWallNotice(address, msgId);
     return;
   }
 
@@ -410,6 +442,12 @@ function renderMessage(result, address) {
 
 function renderInbox() {
   els.inboxList.innerHTML = '';
+
+  if (state.inboxWall) {
+    renderHumanCheck(els.inboxList, state.address);
+    els.mailContent.innerHTML = '<div class="empty">Verify the inbox to read messages.</div>';
+    return;
+  }
 
   if (state.mails.length === 0) {
     els.inboxList.innerHTML = '<div class="empty">No mail.</div>';
@@ -434,6 +472,20 @@ function renderInbox() {
   }
 }
 
+async function getCapturedMessage(msgId) {
+  const key = STORAGE_CAPTURED_PREFIX + msgId;
+  const stored = await chrome.storage.local.get(key);
+  return stored[key] || null;
+}
+
+async function renderCapturedIfAvailable(msgId) {
+  const captured = await getCapturedMessage(msgId);
+  if (!captured || !captured.html) return false;
+  updatePicturesHint(captured.hasBlankImages);
+  renderMessage({ wall: false, html: captured.html, hasBlankImages: captured.hasBlankImages }, state.address, msgId);
+  return true;
+}
+
 async function selectMail(msgId) {
   state.selectedId = msgId;
   renderInbox();
@@ -443,13 +495,25 @@ async function selectMail(msgId) {
 
   els.mailContent.innerHTML = '<div class="empty">Loading message…</div>';
 
+  // If this message was already captured from a verification tab, show it immediately.
+  await renderCapturedIfAvailable(msgId);
+
   try {
     const mode = showPictures ? 'i' : 'm';
-    const rawHtml = await fetchMailBody(state.address, msgId, mode);
-    const result = extractBody(rawHtml);
+    const fetched = await fetchMailBody(state.address, msgId, mode);
 
+    if (fetched.kind === 'wall') {
+      // Prefer a previously captured copy while the API still demands a human check.
+      const capturedShown = await renderCapturedIfAvailable(msgId);
+      if (!capturedShown) {
+        renderWallNotice(state.address, msgId);
+      }
+      return;
+    }
+
+    const result = extractBody(fetched.html);
     updatePicturesHint(result.hasBlankImages);
-    renderMessage(result, state.address);
+    renderMessage(result, state.address, msgId);
   } catch (err) {
     els.mailContent.innerHTML = `<div class="empty error">${escapeHtml(err.message)}</div>`;
   }
@@ -536,16 +600,21 @@ async function go(forceRefresh = false) {
     if (forceRefresh) {
       state.yp = '';
     }
-    state.mails = await fetchInbox(address);
+    const result = await fetchInbox(address);
+    state.inboxWall = result.kind === 'wall';
+    state.mails = result.mails;
     state.selectedId = null;
     renderInbox();
-    if (state.mails.length > 0) {
+    if (state.inboxWall) {
+      setStatus('YOPmail is asking for a human check.');
+    } else if (state.mails.length > 0) {
       setStatus(`Last updated: ${new Date().toLocaleTimeString()}`);
     } else {
       setStatus('No mail.');
     }
   } catch (err) {
     setStatus(err.message, 'error');
+    state.inboxWall = false;
     state.mails = [];
     state.selectedId = null;
     renderInbox();
@@ -645,6 +714,25 @@ els.showPictures.addEventListener('change', async () => {
     selectMail(state.selectedId);
   } else {
     updatePicturesHint(false);
+  }
+});
+
+// Listen for messages from the content script that captured a message in a real tab.
+chrome.runtime.onMessage.addListener((message) => {
+  if (message && message.type === 'captured-mail' && message.msgId && message.html) {
+    // Persist the capture (the content script already does this, but ensure it is stored).
+    chrome.storage.local.set({ [STORAGE_CAPTURED_PREFIX + message.msgId]: message });
+
+    // If this is the currently selected message, render it now.
+    if (state.selectedId === message.msgId) {
+      updatePicturesHint(message.hasBlankImages);
+      renderMessage({ wall: false, html: message.html, hasBlankImages: message.hasBlankImages }, state.address, message.msgId);
+    }
+
+    // Refresh the inbox: the verification may have cleared the session wall.
+    if (state.address) {
+      go(true);
+    }
   }
 });
 

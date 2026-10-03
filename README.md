@@ -35,14 +35,17 @@ A minimal Manifest V3 Chrome extension to check the last few emails of any YOPma
   email is fully visible without horizontal clipping.
 - **Show pictures** — off by default (YOPmail withholds `<img src>` to block tracking beacons). Tick it to
   re-fetch the message in picture mode; the choice is stored in `yopmail_show_pictures` and reused.
-- Some messages (e.g. account-security mails) come back with YOPmail's human-verification challenge. The
-  pane then shows a short notice and an **Open in YOPmail** link instead of a broken render.
+- Some inboxes or messages come back with YOPmail's reCAPTCHA human-verification challenge. The
+  popup then shows **"YOPmail is asking for a human check"** and a **Verify in YOPmail** button instead of
+  a broken render or "No mail.". Clicking it opens the inbox or message in a real Chrome tab; after you
+  tick the checkbox the message is captured automatically and shown in the popup.
 
 ## Files
 
 - `manifest.json` — MV3 manifest.
 - `popup.html`, `popup.css`, `popup.js` — popup UI and logic.
 - `background.js` — minimal service worker.
+- `content-script.js` — read-only capture of messages from real YOPmail tabs.
 - `icon16.png`, `icon48.png`, `icon128.png` — extension icons.
 - `scripts/test-fetch.mjs` — Node test script for the YOPmail HTTP pipeline.
 - `scripts/screenshot.mjs` — Puppeteer harness that drives the popup headlessly (`npm ci` first).
