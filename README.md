@@ -1,8 +1,7 @@
 # YOPmail Checker
 
-A minimal Manifest V3 Chrome extension to check the last few emails of any YOPmail inbox.
-
-![Popup](screenshot-popup.png)
+A minimal Manifest V3 Chrome extension that embeds the YOPmail webmail UI under an
+address bar inside the popup.
 
 ## Install
 
@@ -16,9 +15,9 @@ A minimal Manifest V3 Chrome extension to check the last few emails of any YOPma
 
 1. Click the extension icon.
 2. Enter a YOPmail address (e.g. `hermes.test.e091mc` or `hermes.test.e091mc@yopmail.com`).
-3. Click **Go**.
-4. The left pane lists the last 3 emails; click one to read it in the right pane.
-5. Click **Refresh** to reload the inbox.
+3. Click **Go** to load the inbox inside the popup.
+4. Click **Refresh** to reload the embedded page.
+5. Click **Open in tab** to open the same inbox in a real Chrome tab.
 
 ### Saved addresses
 
@@ -29,36 +28,26 @@ A minimal Manifest V3 Chrome extension to check the last few emails of any YOPma
 - Click the **✕** on a row to remove that address from history.
 - If you upgraded from an older version that only saved a single address, the first launch migrates that value into the new history list automatically.
 
-### Message pane
+### Human-check wall
 
-- HTML newsletters are rendered at a 640 px layout width and scaled to fit the pane, so a 600 px wide
-  email is fully visible without horizontal clipping.
-- **Show pictures** — off by default (YOPmail withholds `<img src>` to block tracking beacons). Tick it to
-  re-fetch the message in picture mode; the choice is stored in `yopmail_show_pictures` and reused.
-- Some inboxes or messages come back with YOPmail's reCAPTCHA human-verification challenge. The
-  popup then shows **"YOPmail is asking for a human check"** and a **Verify in YOPmail** button instead of
-  a broken render or "No mail.". Clicking it opens the inbox or message in a real Chrome tab; after you
-  tick the checkbox the message is captured automatically and shown in the popup.
+YOPmail occasionally asks for a human verification before showing the inbox list.
+Because third-party cookies are blocked inside the popup, the embedded page may hit
+this wall more often than a normal tab. When the extension detects the wall state it:
+
+- displays a hint bar with an **Open in tab** button in the popup, and
+- calls the page's own challenge handler so the challenge is visible inside the frame.
+
+Always use **Open in tab** if the embedded view does not load correctly.
 
 ## Files
 
 - `manifest.json` — MV3 manifest.
+- `rules.json` — Declarative Net Request rules that remove framing/CSP headers from YOPmail responses.
 - `popup.html`, `popup.css`, `popup.js` — popup UI and logic.
 - `background.js` — minimal service worker.
-- `content-script.js` — read-only capture of messages from real YOPmail tabs.
+- `content-script.js` — MAIN-world script that surfaces the human-check wall inside embedded frames.
 - `icon16.png`, `icon48.png`, `icon128.png` — extension icons.
-- `scripts/test-fetch.mjs` — Node test script for the YOPmail HTTP pipeline.
-- `scripts/screenshot.mjs` — Puppeteer harness that drives the popup headlessly (`npm ci` first).
-- `screenshot-*.png` — screenshots used in the docs.
 - `notes/` — coordination briefs (not shipped in the zip).
-
-## Test
-
-```bash
-node scripts/test-fetch.mjs
-```
-
-This prints the parsed first-5 list and a mode matrix (m/i length, image counts, human-wall detection, extracted fragment length) for the live inbox `testmail123@yopmail.com`.
 
 ## Testing / dev
 

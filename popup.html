@@ -24,32 +24,22 @@
       </div>
       <button id="goBtn" class="btn btn-primary">Go</button>
       <button id="refreshBtn" class="btn btn-secondary">Refresh</button>
+      <button id="openTabBtn" class="btn btn-secondary">Open in tab</button>
     </header>
 
-    <div id="status" class="status" aria-live="polite"></div>
+    <div id="hint" class="hint" hidden>
+      <span id="hintText">YOPmail may require a human check.</span>
+      <button id="hintOpenTab" class="btn-link" type="button">Open in tab</button>
+    </div>
 
-    <main class="panes">
-      <section class="pane pane-list">
-        <h2>Inbox</h2>
-        <div id="inboxList" class="inbox-list">
-          <div class="empty">Enter an address and click Go.</div>
-        </div>
-      </section>
-
-      <section class="pane pane-content">
-        <h2>Message</h2>
-        <div class="mail-toolbar" id="mailToolbar">
-          <label class="toggle-label" title="Load remote images (tracking beacons may be loaded)">
-            <input type="checkbox" id="showPictures" />
-            <span>Show pictures</span>
-          </label>
-          <span class="pictures-hint" id="picturesHint" hidden>Some images are hidden</span>
-        </div>
-        <div id="mailContent" class="mail-content">
-          <div class="empty">Select an email to read it.</div>
-        </div>
-      </section>
-    </main>
+    <div class="webmail-wrap">
+      <iframe
+        id="webmailFrame"
+        class="webmail-frame"
+        sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-top-navigation-by-user-activation"
+        allow="fullscreen"
+      ></iframe>
+    </div>
   </div>
 
   <script src="popup.js"></script>
