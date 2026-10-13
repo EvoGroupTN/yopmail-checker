@@ -2,6 +2,7 @@ const STORAGE_KEY = 'yopmail_address';
 const STORAGE_ADDRESSES_KEY = 'yopmail_addresses';
 const WALL_KEY = 'yopmail_wall_detected';
 const MAX_ADDRESSES = 25;
+const EMPTY_RETRY_MAX = 2;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -23,6 +24,11 @@ const els = {
 
 let addresses = [];
 let currentAddress = '';
+let emptyAttempts = 0;
+let emptyNoticeShown = false;
+// HTTP status of the most recent priming fetch (0 = network error / unknown).
+// Used to distinguish a rate-limited IP (429) from an empty mailbox.
+let lastPrimeStatus = 0;
 
 function cleanAddress(raw) {
   let addr = (raw || '').trim().toLowerCase();
@@ -56,6 +62,15 @@ function showWallHint() {
 
 function hideHint() {
   setHint('', false);
+}
+
+function showEmptyNotice() {
+  emptyNoticeShown = true;
+  setHint('Mailbox looks empty — press Refresh, or use Open in tab.', true);
+}
+
+function showRateLimitHint() {
+  setHint('YOPmail is rate-limiting requests — wait a minute and press Refresh.', true);
 }
 
 async function loadAddresses() {
@@ -130,14 +145,64 @@ async function readWallFlag() {
   }
 }
 
+async function primeSession(address) {
+  const login = cleanAddress(address);
+  if (!login) return;
+
+  const url = `https://yopmail.com/en/?login=${encodeURIComponent(login)}`;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(url, {
+      credentials: 'include',
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+    lastPrimeStatus = res.status;
+  } catch (err) {
+    // Network or timeout errors are fine; the cookie write below is the
+    // critical part for making the embedded frame see a valid session.
+    lastPrimeStatus = 0;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  try {
+    const now = new Date();
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    const value = `${hh}:${mm}`;
+
+    if (!chrome.cookies || !chrome.cookies.set) {
+      console.warn('[YOPmail Checker] chrome.cookies API is unavailable');
+      return;
+    }
+
+    await chrome.cookies.set({
+      url: 'https://yopmail.com/',
+      name: 'ytime',
+      value,
+      path: '/',
+      secure: true,
+      sameSite: 'no_restriction',
+    });
+  } catch (err) {
+    console.warn('[YOPmail Checker] failed to set ytime cookie:', err);
+  }
+}
+
 async function loadInbox(address) {
   const addr = cleanAddress(address);
   if (!isValidAddress(addr)) return;
   currentAddress = addr;
+  emptyAttempts = 0;
+  emptyNoticeShown = false;
   els.input.value = addr;
   rememberAddress(addr);
   hideHint();
   await clearWallFlag();
+  await primeSession(addr);
+  if (lastPrimeStatus === 429) showRateLimitHint();
   els.frame.src = getInboxUrl(addr);
 }
 
@@ -147,9 +212,33 @@ async function refreshInbox() {
     if (!isValidAddress(addr)) return;
     currentAddress = addr;
   }
+  emptyAttempts = 0;
+  emptyNoticeShown = false;
   hideHint();
   await clearWallFlag();
+  await primeSession(currentAddress);
+  if (lastPrimeStatus === 429) showRateLimitHint();
   // Reassigning src forces a reload on a cross-origin frame.
+  els.frame.src = getInboxUrl(currentAddress);
+}
+
+async function selfHealInbox() {
+  if (!currentAddress) return;
+  // A rate-limited IP is not an empty mailbox: never retry into a 429.
+  if (lastPrimeStatus === 429) {
+    showRateLimitHint();
+    return;
+  }
+  if (emptyAttempts >= EMPTY_RETRY_MAX) {
+    showEmptyNotice();
+    return;
+  }
+  emptyAttempts += 1;
+  await primeSession(currentAddress);
+  if (lastPrimeStatus === 429) {
+    showRateLimitHint();
+    return;
+  }
   els.frame.src = getInboxUrl(currentAddress);
 }
 
@@ -266,19 +355,31 @@ window.addEventListener('message', (event) => {
 });
 
 chrome.runtime.onMessage.addListener((message) => {
-  if (message && message.type === 'yopmail-wall') {
+  if (!message) return;
+  if (message.type === 'yopmail-wall') {
     showWallHint();
+  } else if (message.type === 'yopmail-empty') {
+    selfHealInbox();
   }
 });
 
-// Reset the hint when the frame starts loading a new mailbox, then check whether
-// the embedded content script flagged a human-check wall.
+// After the frame loads, decide which notice (if any) applies: a rate-limit
+// notice wins, then a real human-check wall, then a self-healed empty mailbox.
 els.frame.addEventListener('load', async () => {
-  hideHint();
-  await sleep(500);
+  await sleep(600);
+  if (lastPrimeStatus === 429) {
+    showRateLimitHint();
+    return;
+  }
   if (await readWallFlag()) {
     showWallHint();
+    return;
   }
+  if (emptyNoticeShown) {
+    showEmptyNotice();
+    return;
+  }
+  hideHint();
 });
 
 async function init() {

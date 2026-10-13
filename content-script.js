@@ -5,9 +5,22 @@
   'use strict';
 
   function isWallState() {
-    // The challenge container is present and hidden on the /wm frame when the
-    // inbox triggers the human check.
-    return !!document.getElementById('r_parent');
+    // YOPmail always carries the challenge container (#r_parent) in the page; it is
+    // only a human-check wall when it is actually being displayed, or when its
+    // widget frame has been injected (the widget exists only when a challenge is
+    // served). Gating on that avoids calling showRc() — and thus displaying the
+    // challenge — on a perfectly healthy mailbox.
+    try {
+      const el = document.getElementById('r_parent');
+      if (!el) return false;
+      const cs = getComputedStyle(el);
+      if (cs.display !== 'none' && cs.visibility !== 'hidden') return true;
+      return !!el.querySelector(
+        'iframe[src*="challenges.cloudflare.com"], iframe[src*="recaptcha"], iframe[src*="hcaptcha"]'
+      );
+    } catch (err) {
+      return false;
+    }
   }
 
   function notifyPopup() {
@@ -53,6 +66,11 @@
   });
 
   if (document.documentElement) {
-    observer.observe(document.documentElement, { childList: true, subtree: true });
+    observer.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['style', 'class'],
+    });
   }
 })();

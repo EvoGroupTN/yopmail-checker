@@ -37,7 +37,28 @@ this wall more often than a normal tab. When the extension detects the wall stat
 - displays a hint bar with an **Open in tab** button in the popup, and
 - calls the page's own challenge handler so the challenge is visible inside the frame.
 
+The hint is shown only when the challenge is **actually displayed** — YOPmail keeps the
+challenge container (`#r_parent`) in the page even when no challenge is running (then it
+is `display: none`), so a healthy mailbox never shows the wall hint.
+
 Always use **Open in tab** if the embedded view does not load correctly.
+
+### Session priming and the empty-list self-heal
+
+YOPmail needs a session cookie that its own JS cannot write inside the embedded
+(third-party) frame, so the mailbox can come back empty while the page itself renders.
+To avoid that, before every iframe load the popup primes the session: it fetches
+`https://yopmail.com/en/?login=<login>` with credentials and writes the `ytime` cookie
+(`HH:MM`, local time) through the `chrome.cookies` API. This runs on popup open with a
+saved address, **Go**, **Refresh** and selecting a saved address.
+
+If the embedded inbox still comes back with no message rows (and no human-check state),
+the content script reports it and the popup retries once with a fresh prime — at most two
+extra attempts. After that it shows *"Mailbox looks empty — press Refresh, or use Open in
+tab."* and stops (no infinite reload loop).
+
+If YOPmail rate-limits the IP (HTTP 429) the popup says so instead — *"YOPmail is
+rate-limiting requests — wait a minute and press Refresh."* — and does not retry.
 
 ## Files
 
