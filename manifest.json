@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "YOPmail Checker",
-  "version": "1.2.0",
-  "description": "Quickly check your YOPmail inbox from the Chrome toolbar.",
+  "version": "1.2.1",
+  "description": "Embeds the YOPmail webmail in the toolbar popup, with session priming and an in-popup human check.",
   "permissions": [
     "storage",
     "scripting",

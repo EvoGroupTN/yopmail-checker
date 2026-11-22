@@ -8,15 +8,35 @@
   const WALL_KEY = 'yopmail_wall_detected';
 
   // YOPmail keeps the challenge container (#r_parent) in the page even when no
-  // challenge is running; in that case its computed display is 'none'. A challenge
-  // counts only when it is actually being displayed, or when its widget frame has
-  // been injected (the widget is created only when a challenge is served).
-  function challengeActive(doc) {
+  // challenge is running (then display is 'none'). Two separate notions matter:
+  //   displayed - the human check is on screen right now (drives the wall hint and
+  //               detects that it cleared once the user solved it);
+  //   served    - a challenge was asked for (displayed, or its widget frame was
+  //               injected while hidden); keeps an empty list from being reported as
+  //               an empty mailbox.
+  function elementShown(el) {
+    try {
+      const cs = getComputedStyle(el);
+      return cs.display !== 'none' && cs.visibility !== 'hidden';
+    } catch (err) {
+      return false;
+    }
+  }
+
+  function challengeDisplayed(doc) {
+    try {
+      const el = doc.getElementById('r_parent');
+      return !!el && elementShown(el);
+    } catch (err) {
+      return false;
+    }
+  }
+
+  function challengeServed(doc) {
     try {
       const el = doc.getElementById('r_parent');
       if (!el) return false;
-      const cs = (doc.defaultView || window).getComputedStyle(el);
-      if (cs.display !== 'none' && cs.visibility !== 'hidden') return true;
+      if (elementShown(el)) return true;
       return !!el.querySelector(
         'iframe[src*="challenges.cloudflare.com"], iframe[src*="recaptcha"], iframe[src*="hcaptcha"]'
       );
@@ -26,7 +46,7 @@
   }
 
   function isWallState() {
-    return challengeActive(document);
+    return challengeDisplayed(document);
   }
 
   function signalWall() {
@@ -42,16 +62,38 @@
     }
   }
 
-  if (isWallState()) {
-    signalWall();
+  let wallSignalSent = false;
+
+  function signalChallengeDone() {
+    // The challenge was solved: hand the frame's cookies to the extension so it can
+    // persist the session (session-only cookies would otherwise die with the browser).
+    let cookie = '';
+    try {
+      cookie = document.cookie || '';
+    } catch (err) {
+      // Ignore.
+    }
+    try {
+      chrome.runtime.sendMessage({ type: 'yopmail-challenge-done', cookie, url: location.href });
+    } catch (err) {
+      // Background unavailable.
+    }
   }
 
-  const wallObserver = new MutationObserver(() => {
-    if (isWallState()) {
+  function noteWallState() {
+    const visible = isWallState();
+    if (visible && !wallSignalSent) {
+      wallSignalSent = true;
       signalWall();
-      wallObserver.disconnect();
+    } else if (!visible && wallSignalSent) {
+      wallSignalSent = false;
+      signalChallengeDone();
     }
-  });
+  }
+
+  noteWallState();
+
+  const wallObserver = new MutationObserver(noteWallState);
 
   if (document.documentElement) {
     wallObserver.observe(document.documentElement, {
@@ -88,7 +130,7 @@
         return false;
       }
       if (!doc) return false;
-      if (challengeActive(doc)) return true;
+      if (challengeServed(doc)) return true;
       if (!win.parent || win.parent === win) break;
       win = win.parent;
     }

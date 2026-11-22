@@ -1,70 +1,123 @@
 // MAIN-world content script for embedded YOPmail frames.
-// It detects the human-check wall state, calls the page's own showRc() so the
-// challenge is rendered inside the frame, and also notifies the popup via postMessage.
+//
+// 1. Render YOPmail's human check inside the popup iframe. YOPmail's /inbox page runs
+//    `window.top.showRc()` when the server asks for a challenge; inside the popup
+//    `window.top` is the extension page (cross-origin), so that call throws and the
+//    widget never appears. The /inbox and /wm frames are same-origin, so forward the
+//    request to the nearest accessible ancestor that exposes showRc().
+// 2. Tell the popup when a challenge becomes visible (and when it clears).
 (function () {
   'use strict';
 
-  function isWallState() {
-    // YOPmail always carries the challenge container (#r_parent) in the page; it is
-    // only a human-check wall when it is actually being displayed, or when its
-    // widget frame has been injected (the widget exists only when a challenge is
-    // served). Gating on that avoids calling showRc() — and thus displaying the
-    // challenge — on a perfectly healthy mailbox.
+  // A challenge counts as displayed only when its container is laid out. YOPmail keeps
+  // #r_parent in the page when idle (display:none), so presence alone means nothing.
+  function challengeDisplayed() {
     try {
       const el = document.getElementById('r_parent');
       if (!el) return false;
       const cs = getComputedStyle(el);
-      if (cs.display !== 'none' && cs.visibility !== 'hidden') return true;
-      return !!el.querySelector(
-        'iframe[src*="challenges.cloudflare.com"], iframe[src*="recaptcha"], iframe[src*="hcaptcha"]'
-      );
+      return cs.display !== 'none' && cs.visibility !== 'hidden';
     } catch (err) {
       return false;
     }
   }
 
-  function notifyPopup() {
+  function notifyPopup(type) {
     try {
-      window.parent.postMessage(
-        { type: 'yopmail-wall', url: location.href },
-        '*'
-      );
+      window.parent.postMessage({ type, url: location.href }, '*');
     } catch (err) {
-      // Ignore cross-origin postMessage failures.
+      // Cross-origin parent; ignore.
     }
   }
 
-  function showChallenge() {
-    if (typeof showRc === 'function') {
+  // Nearest same-origin window (self or ancestor) exposing showRc().
+  function findChallengeHost() {
+    let win = window;
+    for (let i = 0; i < 4; i += 1) {
       try {
-        showRc();
+        if (typeof win.showRc === 'function') return win;
       } catch (err) {
-        // showRc may rely on window.top which is cross-origin in the popup.
+        return null;
       }
+      if (!win.parent || win.parent === win) break;
+      win = win.parent;
+    }
+    return null;
+  }
+
+  function requestChallenge() {
+    const host = findChallengeHost();
+    if (!host) return false;
+    try {
+      host.showRc();
+      return true;
+    } catch (err) {
+      return false;
     }
   }
 
-  function handleWall() {
-    notifyPopup();
-    showChallenge();
-  }
-
-  let handled = false;
-
-  if (isWallState()) {
-    handled = true;
-    handleWall();
-  }
-
-  // YOPmail builds the inbox dynamically; watch for the challenge container to appear.
-  const observer = new MutationObserver(() => {
-    if (isWallState() && !handled) {
-      handled = true;
-      handleWall();
-      observer.disconnect();
+  // YOPmail's /inbox stub runs an inline script calling window.top.showRc() only when
+  // the server is asking for a human check. That call failed in the popup, so this is
+  // the reliable "challenge was requested" marker.
+  function challengeRequestedByPage() {
+    try {
+      const scripts = document.querySelectorAll('script');
+      for (const s of scripts) {
+        if (/(?:window\.)?top\.showRc\s*\(/.test(s.textContent || '')) return true;
+      }
+    } catch (err) {
+      // Ignore.
     }
-  });
+    return false;
+  }
 
+  let wallNotified = false;
+
+  function sample() {
+    const visible = challengeDisplayed();
+    if (visible && !wallNotified) {
+      wallNotified = true;
+      notifyPopup('yopmail-wall');
+    } else if (!visible && wallNotified) {
+      wallNotified = false;
+      notifyPopup('yopmail-challenge-done');
+    }
+  }
+
+  if (challengeDisplayed()) {
+    wallNotified = true;
+    notifyPopup('yopmail-wall');
+  }
+
+  // The challenge container becomes visible synchronously inside showRc(), so one
+  // forward is normally enough; retry only while it is still hidden (bounded), so the
+  // challenge can never be re-shown after the user solved it.
+  function challengeVisibleAtHost() {
+    try {
+      const host = findChallengeHost();
+      const el = host && host.document.getElementById('r_parent');
+      return !!el && host.getComputedStyle(el).display !== 'none';
+    } catch (err) {
+      return false;
+    }
+  }
+
+  if (challengeRequestedByPage()) {
+    requestChallenge();
+    if (!challengeVisibleAtHost()) {
+      let tries = 0;
+      const timer = setInterval(() => {
+        tries += 1;
+        if (challengeVisibleAtHost() || tries >= 4) {
+          clearInterval(timer);
+          return;
+        }
+        requestChallenge();
+      }, 800);
+    }
+  }
+
+  const observer = new MutationObserver(sample);
   if (document.documentElement) {
     observer.observe(document.documentElement, {
       childList: true,

@@ -60,6 +60,21 @@ function showWallHint() {
   setHint('YOPmail is asking for a human check. Use Open in tab to continue.', true);
 }
 
+// The embedded challenge was solved: clear the wall flag, drop the wall hint and ask
+// the background to persist the session cookies (the popup is open whenever the user
+// solves the challenge, so this is the most reliable trigger).
+function handleChallengeDone() {
+  clearWallFlag();
+  if (els.hintText.textContent.indexOf('human check') !== -1) {
+    hideHint();
+  }
+  try {
+    chrome.runtime.sendMessage({ type: 'yopmail-challenge-done' });
+  } catch (err) {
+    // Background unavailable; the content script's own message still covers it.
+  }
+}
+
 function hideHint() {
   setHint('', false);
 }
@@ -349,8 +364,11 @@ document.addEventListener('mousedown', (e) => {
 // Listen for wall-detection messages from the embedded YOPmail frame.
 window.addEventListener('message', (event) => {
   if (event.origin !== 'https://yopmail.com' && event.origin !== 'https://www.yopmail.com') return;
-  if (event.data && event.data.type === 'yopmail-wall') {
+  if (!event.data) return;
+  if (event.data.type === 'yopmail-wall') {
     showWallHint();
+  } else if (event.data.type === 'yopmail-challenge-done') {
+    handleChallengeDone();
   }
 });
 
@@ -358,6 +376,8 @@ chrome.runtime.onMessage.addListener((message) => {
   if (!message) return;
   if (message.type === 'yopmail-wall') {
     showWallHint();
+  } else if (message.type === 'yopmail-challenge-done') {
+    handleChallengeDone();
   } else if (message.type === 'yopmail-empty') {
     selfHealInbox();
   }
